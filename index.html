@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<title>C-17 Duty Day</title>
+<link rel="manifest" href="./manifest.json" />
+<link rel="apple-touch-icon" href="./icon-192.png" />
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', sans-serif;
+    min-height: 100vh; transition: background 0.4s ease;
+  }
+  input { font-family: inherit; }
+  .mono { font-family: 'SF Mono', ui-monospace, 'Menlo', monospace; }
+  button { font-family: inherit; border: none; cursor: pointer; }
+  input[type=number]::-webkit-inner-spin-button,
+  input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+  input[type=number] { -moz-appearance: textfield; }
+  .wrap { width: 100%; max-width: 440px; margin: 0 auto; padding: 10px 14px 28px; }
+  #err { color:#fff; background:#C0392B; padding:10px; border-radius:8px; font-size:12px; margin:10px; display:none; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<div id="err"></div>
+<div id="app" class="wrap"></div>
+
+<script>
+"use strict";
+try {
+
+/* ---------- deep clone (no structuredClone; Safari-safe) ---------- */
+function clone(o){ return JSON.parse(JSON.stringify(o)); }
+
+/* ---------- persistent state ---------- */
+var STORE_KEY = "c17duty.v3";
+var defaultState = {
+  tab: "bravo",
+  offset: "-4",
+  bravo: { lfa: "", lfaDate: "" },
+  airland: { takeoff: "", legs: "long", bravoSeq: false },
+  tracker: {
+    mode: "aug", legs: "long",
+    alertDate: "",   // YYYY-MM-DD; blank => default to today at render
+    alert: ""        // HH:MM Zulu
+  }
+};
+function loadState(){
+  try{
+    var raw = localStorage.getItem(STORE_KEY);
+    if(!raw) return clone(defaultState);
+    var p = JSON.parse(raw);
+    var s = clone(defaultState);
+    if(p.tab) s.tab = p.tab;
+    if(p.offset !== undefined) s.offset = p.offset;
+    if(p.bravo) for(var k in p.bravo) s.bravo[k]=p.bravo[k];
+    if(p.airland) for(var k2 in p.airland) s.airland[k2]=p.airland[k2];
+    if(p.tracker) for(var k3 in p.tracker) s.tracker[k3]=p.tracker[k3];
+    return s;
+  }catch(e){ return clone(defaultState); }
+}
+function saveState(){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }catch(e){} }
+var S = loadState();
+
+/* ---------- time utils ---------- */
+function toMinutes(hhmm){
+  if(!hhmm || typeof hhmm!=="string") return null;
+  var parts = hhmm.split(":"); if(parts.length!==2) return null;
+  var h=Number(parts[0]), m=Number(parts[1]);
+  if(isNaN(h)||isNaN(m)||h<0||h>23||m<0||m>59) return null;
+  return h*60+m;
+}
+function fromMinutes(mins){
+  if(mins===null||mins===undefined) return "--:--";
+  var t=((mins%1440)+1440)%1440;
+  return String(Math.floor(t/60)).padStart(2,"0")+":"+String(t%60).padStart(2,"0");
+}
+function addH(b,h){ return b===null?null:b+h*60; }
+function subH(b,h){ return b===null?null:b-h*60; }
+function toLocal(z,off){ return z===null?null:z+off*60; }
+function julianDate(d){
+  var start=Date.UTC(d.getUTCFullYear(),0,0);
+  var diff=Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),d.getUTCDate())-start;
+  var day=Math.floor(diff/86400000);
+  return String(d.getUTCFullYear()).slice(-2)+String(day).padStart(3,"0");
+}
+var MONTHS=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+function calDate(d){ return String(d.getUTCDate()).padStart(2,"0")+MONTHS[d.getUTCMonth()]; }
+// "JD 26171 · 20JUN" for a Date
+function julCal(d){ return "JD "+julianDate(d)+" \u00B7 "+calDate(d); }
+function fmtTimeTyping(raw,prev){
+  // keep only digits, cap at 4 (HHMM), insert colon after 2nd digit
+  var d=String(raw).replace(/[^0-9]/g,"").slice(0,4);
+  if(d.length<=2) return d;
+  return d.slice(0,2)+":"+d.slice(2);
+}
+function fmtDur(mins){
+  if(mins===null) return "--:--";
+  var neg=mins<0, a=Math.abs(mins);
+  return (neg?"\u2212":"")+Math.floor(a/60)+":"+String(a%60).padStart(2,"0");
+}
+
+/* ---------- themes ---------- */
+var THEMES = {
+  bravo:{ bg:"linear-gradient(165deg,#F7D85C 0%,#F2C94C 55%,#E8B84A 100%)",
+    headerBg:"linear-gradient(135deg,#A85F22 0%,#8A4A18 100%)", headerColor:"#fff",
+    headerSub:"BRAVO ALERT", headerSubColor:"#F4D2A0", card:"rgba(255,252,240,0.78)",
+    accent:"#A85F22", inputRing:"#A85F22", rowLine:"rgba(120,72,20,0.12)",
+    labelColor:"#3a2a12", subColor:"#8a7340", zuluColor:"#2a1f10", localColor:"#6b5526", highlight:"#FFE600" },
+  airland:{ bg:"linear-gradient(165deg,#6E8BA3 0%,#5E7A92 55%,#516B81 100%)",
+    headerBg:"linear-gradient(135deg,#AED4F2 0%,#93C4EC 100%)", headerColor:"#123247",
+    headerSub:"AIRLAND", headerSubColor:"#1c4763", card:"rgba(190,222,246,0.82)",
+    accent:"#1f5d86", inputRing:"#1f5d86", rowLine:"rgba(20,50,71,0.12)",
+    labelColor:"#16384f", subColor:"#456379", zuluColor:"#0f2c3e", localColor:"#345064", highlight:"#FFE600" },
+  tracker:{ bg:"linear-gradient(165deg,#2E3B45 0%,#28333C 55%,#232E37 100%)",
+    headerBg:"linear-gradient(135deg,#1F8A5B 0%,#14694A 100%)", headerColor:"#fff",
+    headerSub:"DUTY DAY TRACKER", headerSubColor:"#A8E6C9", card:"rgba(245,250,248,0.94)",
+    accent:"#1F8A5B", inputRing:"#1F8A5B", rowLine:"rgba(20,60,45,0.12)",
+    labelColor:"#16382a", subColor:"#4a6b5c", zuluColor:"#0f2c20", localColor:"#345048", highlight:"#FFE600" }
+};
+
+/* ---------- DOM helper ---------- */
+function el(tag, props){
+  var e=document.createElement(tag);
+  if(props) for(var k in props){
+    if(k==="style") for(var s in props.style) e.style[s]=props.style[s];
+    else if(k==="class") e.className=props[k];
+    else if(k.indexOf("on")===0 && typeof props[k]==="function") e.addEventListener(k.slice(2).toLowerCase(),props[k]);
+    else if(props[k]!==undefined && props[k]!==null) e.setAttribute(k,props[k]);
+  }
+  for(var i=2;i<arguments.length;i++){
+    var kid=arguments[i];
+    if(kid==null||kid===false) continue;
+    e.appendChild(typeof kid==="string"?document.createTextNode(kid):kid);
+  }
+  return e;
+}
+
+/* faint suffix marker: "Z" or "L" */
+function mark(t, ch){
+  return el("span",{class:"mono",style:{fontSize:"11px",fontWeight:"700",color:t.subColor,opacity:"0.6",marginLeft:"3px"}}, ch);
+}
+
+/* computed time cell with Z or L suffix; setValue() updates text in place */
+function cell(value, color, suffix, t, hi){
+  var txt=document.createTextNode(value);
+  var box=el("div",{style:{
+    fontSize:"16px",fontWeight:"600",
+    fontVariantNumeric:"tabular-nums",fontFamily:"'SF Mono',ui-monospace,monospace",letterSpacing:"0.3px",
+    color: hi?"#1a1a1a":color, background: hi?"#FFE600":"transparent",
+    borderRadius: hi?"6px":"0", padding: hi?"2px 4px":"0",
+    display:"flex",alignItems:"baseline",justifyContent:"center"
+  }});
+  box.appendChild(txt);
+  if(suffix) box.appendChild(mark(t, suffix));
+  box.setValue=function(v){ txt.nodeValue=v; };
+  return box;
+}
+
+/* computed row: label | Zulu(+Z) | Local(+L); .update(zMins,off) refreshes in place */
+function row(t,label,sub,zuluMins,off,opts){
+  opts=opts||{};
+  var zCell=cell(fromMinutes(zuluMins),t.zuluColor,"Z",t,opts.highlight);
+  var lCell=cell(fromMinutes(toLocal(zuluMins,off)),t.localColor,"L",t);
+  var e=el("div",{style:{
+    display:"grid",gridTemplateColumns:"1fr 96px 84px",alignItems:"center",
+    padding:"4px 0", borderBottom: opts.last?"none":"1px solid "+t.rowLine
+  }},
+    el("div",{style:{minWidth:"0"}},
+      el("div",{style:{fontWeight:"600",fontSize:"14px",color:t.labelColor,letterSpacing:"-0.2px"}},label),
+      el("div",{style:{fontSize:"10px",color:t.subColor,marginTop:"1px",fontWeight:"500"}},sub)
+    ),
+    zCell, lCell
+  );
+  e.update=function(zMins,o){ zCell.setValue(fromMinutes(zMins)); lCell.setValue(fromMinutes(toLocal(zMins,o))); };
+  return e;
+}
+
+/* input row: typed Zulu(+Z) | computed Local(+L). Never rebuilds the input. */
+function inputRow(t,label,sub,getVal,setVal,off,opts){
+  opts=opts||{};
+  var localCell=cell(fromMinutes(toLocal(toMinutes(getVal()),off)),t.localColor,"L",t);
+  var inp=el("input",{type:"text",inputmode:"numeric",placeholder:"\u2013\u2013:\u2013\u2013",value:getVal(),maxlength:"5",
+    style:{width:"66px",textAlign:"center",padding:"6px 4px",fontSize:"16px",fontWeight:"700",
+      border:"none",borderRadius:"8px",background:"#fff",color:"#1a1a1a",outline:"2px solid "+t.inputRing,
+      fontFamily:"'SF Mono',ui-monospace,monospace",letterSpacing:"0.5px"}});
+  inp.addEventListener("input",function(){
+    var nv=fmtTimeTyping(inp.value,getVal());
+    if(nv!==inp.value){ inp.value=nv; }
+    setVal(nv); saveState();
+    var o=parseFloat(S.offset)||0;
+    localCell.setValue(fromMinutes(toLocal(toMinutes(nv),o)));
+    if(opts.onChange) opts.onChange();   // recompute derived rows in place
+  });
+  return el("div",{style:{
+    display:"grid",gridTemplateColumns:"1fr 96px 84px",alignItems:"center",padding:"6px 0",
+    borderTop: opts.anchor?"2px solid "+t.rowLine:"none",
+    borderBottom: opts.last?"none":(opts.anchor?"2px solid "+t.rowLine:"1px solid "+t.rowLine),
+    margin: opts.anchor?"2px 0":"0"
+  }},
+    el("div",null,
+      el("div",{style:{fontWeight:"700",fontSize:opts.anchor?"15px":"14px",color:t.labelColor,letterSpacing:"-0.2px"}},label),
+      el("div",{style:{fontSize:"10px",color:t.subColor,marginTop:"1px",fontWeight:"600"}},sub)
+    ),
+    el("div",{style:{display:"flex",alignItems:"center",justifyContent:"center"}},inp,mark(t,"Z")),
+    localCell
+  );
+}
+
+function card(t,padding){
+  var c=el("div",{style:{background:t.card,borderRadius:"12px",padding:padding||"2px 14px 4px",marginBottom:"6px"}});
+  for(var i=2;i<arguments.length;i++) if(arguments[i]) c.appendChild(arguments[i]);
+  return c;
+}
+function legBtn(t,active,onClick,top,bot,midLabel){
+  return el("button",{onClick:onClick,style:{flex:"1",padding:"6px 8px",borderRadius:"10px",
+    border:active?"2px solid "+t.accent:"2px solid transparent",
+    background:active?"#fff":"rgba(255,255,255,0.4)",
+    boxShadow:active?"0 2px 8px rgba(0,0,0,0.12)":"none",transition:"all 0.15s"}},
+    el("div",{style:{fontSize:"14px",fontWeight:"700",color:t.labelColor}},top),
+    el("div",{style:{fontSize:"10px",color:t.subColor,margin:"1px 0",fontWeight:"600"}},midLabel===undefined?"OR":midLabel),
+    el("div",{style:{fontSize:"14px",fontWeight:"700",color:t.labelColor}},bot)
+  );
+}
+function miniBtn(t,active,onClick,txt){
+  return el("button",{onClick:onClick,style:{flex:"1",padding:"8px 6px",borderRadius:"10px",
+    border:active?"2px solid "+t.accent:"2px solid transparent",
+    background:active?"#fff":"rgba(255,255,255,0.4)",fontSize:"13px",fontWeight:"700",color:t.labelColor,
+    boxShadow:active?"0 2px 8px rgba(0,0,0,0.12)":"none",transition:"all 0.15s"}},txt);
+}
+function subBtn(t,active,onClick,txt){
+  return el("button",{onClick:onClick,style:{flex:"1",padding:"6px",borderRadius:"9px",fontSize:"13px",fontWeight:"700",
+    color:active?"#fff":t.subColor,background:active?t.accent:"transparent",transition:"all 0.2s"}},txt);
+}
+
+/* ---------- tab builders ---------- */
+function bravoTab(t){
+  var off=parseFloat(S.offset)||0;
+  if(!S.bravo.lfaDate){ S.bravo.lfaDate=todayStr(); }
+
+  // each row shows: label (+JD under it) | Zulu+Z | Local+L, computed from absolute mins
+  function absRow(label,sub,opts){
+    opts=opts||{};
+    var zT=document.createTextNode("--:--"), lT=document.createTextNode("--:--"), jT=document.createTextNode("");
+    var zEl=el("div",{class:"mono",style:{fontSize:"16px",fontWeight:"600",color:opts.highlight?"#1a1a1a":t.zuluColor,display:"flex",alignItems:"baseline",justifyContent:"center",
+      background:opts.highlight?"#FFE600":"transparent",borderRadius:opts.highlight?"6px":"0",padding:opts.highlight?"2px 4px":"0"}});
+    zEl.appendChild(zT); zEl.appendChild(mark(t,"Z"));
+    var lEl=el("div",{class:"mono",style:{fontSize:"16px",fontWeight:"600",color:t.localColor,display:"flex",alignItems:"baseline",justifyContent:"center"}});
+    lEl.appendChild(lT); lEl.appendChild(mark(t,"L"));
+    var jEl=el("div",{class:"mono",style:{fontSize:"9px",fontWeight:"700",color:t.subColor,marginTop:"1px"}});
+    jEl.appendChild(jT);
+    var e=el("div",{style:{display:"grid",gridTemplateColumns:"1fr 96px 84px",alignItems:"center",padding:"4px 0",
+      borderBottom: opts.last?"none":"1px solid "+t.rowLine}},
+      el("div",{style:{minWidth:"0"}},
+        el("div",{style:{fontWeight:"600",fontSize:"14px",color:t.labelColor,letterSpacing:"-0.2px"}},label),
+        el("div",{style:{fontSize:"10px",color:t.subColor,marginTop:"1px",fontWeight:"500"}},sub),
+        jEl
+      ),
+      zEl, lEl
+    );
+    e.set=function(absM,o){ zT.nodeValue=absZ(absM,0); lT.nodeValue=absZ(absM,o); jT.nodeValue=absM===null?"":julCalFromAbs(absM); };
+    return e;
+  }
+
+  var c=card(t,"4px 16px 8px");
+  var rBeer=absRow("Last Beer","LFA \u2212 12:00");
+  var rAmb=absRow("Latest Ambien","LFA \u2212 6:00",{last:true});
+  var rBurn=absRow("Burn Out","LFA + 48:00");
+  var rReset=absRow("Earliest Reset","BO + 12:00",{last:true});
+
+  // LFA input row: date + Zulu time
+  var dateEl=el("input",{type:"date",value:S.bravo.lfaDate||todayStr(),style:{flex:"1",padding:"7px 8px",fontSize:"14px",fontWeight:"600",
+    border:"none",borderRadius:"8px",background:"#fff",color:"#1a1a1a",outline:"2px solid "+t.inputRing,fontFamily:"inherit"}});
+  dateEl.addEventListener("change",function(){ S.bravo.lfaDate=dateEl.value||todayStr(); saveState(); recompute(); });
+  var timeEl=el("input",{type:"text",inputmode:"numeric",placeholder:"\u2013\u2013:\u2013\u2013",value:S.bravo.lfa||"",maxlength:"5",
+    style:{width:"66px",textAlign:"center",padding:"7px 4px",fontSize:"15px",fontWeight:"700",
+      border:"none",borderRadius:"8px",background:"#fff",color:"#1a1a1a",outline:"2px solid "+t.inputRing,
+      fontFamily:"'SF Mono',ui-monospace,monospace"}});
+  timeEl.addEventListener("input",function(){ var nv=fmtTimeTyping(timeEl.value); if(nv!==timeEl.value)timeEl.value=nv; S.bravo.lfa=nv; saveState(); recompute(); });
+  var lfaRow=el("div",{style:{padding:"8px 0",borderTop:"2px solid "+t.rowLine,borderBottom:"2px solid "+t.rowLine,margin:"2px 0"}},
+    el("div",{style:{fontWeight:"700",fontSize:"15px",color:t.labelColor,marginBottom:"4px"}},"Earliest Alert",
+      el("span",{style:{fontSize:"10px",color:t.subColor,fontWeight:"600",marginLeft:"6px"}},"Legal For Alert (LFA)")),
+    el("div",{style:{display:"flex",gap:"6px",alignItems:"center"}},dateEl,
+      el("div",{style:{display:"flex",alignItems:"center"}},timeEl,mark(t,"Z")))
+  );
+
+  // countdown to LFA from now
+  var cdTxt=document.createTextNode("--:--");
+  var cdBox=el("div",{class:"mono",style:{fontSize:"34px",fontWeight:"800",color:t.accent,letterSpacing:"0.5px",lineHeight:"1"}});
+  cdBox.appendChild(cdTxt);
+  var countCard=card(t,"12px 14px",
+    el("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between"}},
+      el("div",{style:{fontWeight:"700",fontSize:"15px",color:t.labelColor}},"Time Until Earliest Alert"),
+      cdBox
+    )
+  );
+  countCard.style.marginBottom="0";
+
+  function recompute(){
+    var o=parseFloat(S.offset)||0;
+    var lfaAbs=absFromDateTime(S.bravo.lfaDate,S.bravo.lfa);
+    rBeer.set(lfaAbs===null?null:lfaAbs-12*60,o);
+    rAmb.set(lfaAbs===null?null:lfaAbs-6*60,o);
+    rBurn.set(lfaAbs===null?null:lfaAbs+48*60,o);
+    rReset.set(lfaAbs===null?null:lfaAbs+60*60,o);
+    var rem=(lfaAbs===null)?null:Math.round(lfaAbs-Date.now()/60000);
+    cdTxt.nodeValue=fmtDur(rem);
+    cdBox.style.color=(rem===null)?t.accent:(rem<0?"#C0392B":t.accent);
+  }
+
+  c.appendChild(rBeer);
+  c.appendChild(rAmb);
+  c.appendChild(lfaRow);
+  c.appendChild(rBurn);
+  c.appendChild(rReset);
+  recompute();
+  var wrap=el("div",null,c,countCard);
+  wrap._tick=recompute;   // live clock refreshes the countdown
+  liveNode=wrap;
+  return wrap;
+}
+function airlandFdpHrs(legs){ return legs==="basic"?16:(legs==="short"?18:24); }
+function cdtHrs(legs){ return legs==="basic"?18:24.75; }   // Basic: Show+18:00; Augmented(18/24): Show+24:45
+function cdtLabel(legs){ return legs==="basic"?"18:00":"24:45"; }
+function airlandTab(t){
+  var off=parseFloat(S.offset)||0;
+  var to=toMinutes(S.airland.takeoff);
+  var bravo=!!S.airland.bravoSeq;
+  var alertOff=bravo?3:3.75;            // Bravo sequence => Alert is Takeoff − 3:00
+  var show=subH(to,2.75), alert=subH(to,alertOff), stations=subH(to,0.75);
+  var legs=S.airland.legs, fdpHrs=airlandFdpHrs(legs);
+  var legsCard=card(t,"6px 10px",
+    el("div",{style:{fontSize:"10px",fontWeight:"700",color:t.labelColor,marginBottom:"4px",letterSpacing:"0.5px"}},
+      "QUALIFYING LEGS \u00B7 "+fdpHrs+" HR DUTY DAY"),
+    el("div",{style:{display:"flex",gap:"6px",marginBottom:"6px"}},
+      legBtn(t,legs==="basic",function(){S.airland.legs="basic";saveState();render();},"Basic","16 hr","\u00A0"),
+      legBtn(t,legs==="short",function(){S.airland.legs="short";saveState();render();},"18 hr","1\u00D75 / 2\u00D73"),
+      legBtn(t,legs==="long",function(){S.airland.legs="long";saveState();render();},"24 hr","1\u00D76 / 2\u00D74")
+    ),
+    miniBtn(t,bravo,function(){S.airland.bravoSeq=!S.airland.bravoSeq;saveState();render();},
+      bravo?"Bravo Sequence: ON":"Bravo Sequence: OFF")
+  );
+  var crew=card(t,"2px 14px 4px");
+  var rBeer=row(t,"Last Beer","Takeoff \u2212 12:00",subH(to,12),off);
+  var rAmb=row(t,"Last Ambien","Alert \u2212 6:00",subH(alert,6),off,{last:true});
+  crew.appendChild(rBeer); crew.appendChild(rAmb);
+  var normal=card(t,"2px 14px 4px");
+  var rAlert=row(t,"Alert","Takeoff \u2212 "+(bravo?"3:00":"3:45"),alert,off);
+  var rShow=row(t,"Show","Takeoff \u2212 2:45",show,off);
+  var rSta=row(t,"Stations","Takeoff \u2212 0:45",stations,off);
+  var rTrain=row(t,"Training Events","Show + 12:00",addH(show,12),off);
+  var rStops=row(t,"3 Stops Left","Show + 14:00",addH(show,14),off);
+  var rFDP=row(t,"FDP","Show + "+fdpHrs+":00",addH(show,fdpHrs),off,{highlight:true});
+  var rCDT=row(t,"CDT","Show + "+cdtLabel(legs),addH(show,cdtHrs(legs)),off,{last:true});
+  function recompute(){
+    var o=parseFloat(S.offset)||0, m=toMinutes(S.airland.takeoff);
+    var ao=S.airland.bravoSeq?3:3.75;
+    var sh=subH(m,2.75), al=subH(m,ao), st=subH(m,0.75);
+    var fh=airlandFdpHrs(S.airland.legs);
+    rBeer.update(subH(m,12),o); rAmb.update(subH(al,6),o);
+    rAlert.update(al,o); rShow.update(sh,o); rSta.update(st,o);
+    rTrain.update(addH(sh,12),o); rStops.update(addH(sh,14),o);
+    rFDP.update(addH(sh,fh),o); rCDT.update(addH(sh,cdtHrs(S.airland.legs)),o);
+  }
+  normal.appendChild(rAlert); normal.appendChild(rShow); normal.appendChild(rSta);
+  normal.appendChild(inputRow(t,"Takeoff","Enter planned takeoff",
+    function(){return S.airland.takeoff;}, function(v){S.airland.takeoff=v;}, off,{anchor:true,onChange:recompute}));
+  normal.appendChild(rTrain); normal.appendChild(rStops); normal.appendChild(rFDP); normal.appendChild(rCDT);
+  return el("div",null,legsCard,crew,normal);
+}
+
+function remColor(t,m){ return m===null?t.accent:(m<=0?"#C0392B":(m<=120?"#D9822B":t.accent)); }
+
+/* date/time helpers for the tracker (absolute minutes since epoch, UTC) */
+function todayStr(){
+  var n=new Date();
+  return n.getUTCFullYear()+"-"+String(n.getUTCMonth()+1).padStart(2,"0")+"-"+String(n.getUTCDate()).padStart(2,"0");
+}
+function absFromDateTime(dateStr,timeStr){
+  var tm=toMinutes(timeStr); if(!dateStr||tm===null) return null;
+  var p=dateStr.split("-"); if(p.length!==3) return null;
+  return Date.UTC(+p[0],+p[1]-1,+p[2],Math.floor(tm/60),tm%60)/60000;
+}
+function absZ(a,o){ if(a===null)return "--:--"; var d=new Date((a+o*60)*60000); return fromMinutes(d.getUTCHours()*60+d.getUTCMinutes()); }
+function julFromAbs(a){ if(a===null)return ""; return julianDate(new Date(a*60000)); }
+function julCalFromAbs(a){ if(a===null)return ""; return julCal(new Date(a*60000)); }
+
+function trackerTab(t,now){
+  var off=parseFloat(S.offset)||0;
+  var tr=S.tracker;
+  // default alert date to today if blank
+  if(!tr.alertDate){ tr.alertDate=todayStr(); }
+
+  var fdpHrs=tr.mode==="basic"?16:(tr.legs==="short"?18:24);
+
+  /* ----- type selector: Basic / 18hr Aug / 24hr Aug ----- */
+  var isBasic=tr.mode==="basic", is18=(tr.mode==="aug"&&tr.legs==="short"), is24=(tr.mode==="aug"&&tr.legs==="long");
+  var typeCard=card(t,"6px 10px",
+    el("div",{style:{fontSize:"10px",fontWeight:"700",color:t.labelColor,marginBottom:"4px",letterSpacing:"0.5px"}},
+      "DUTY DAY TYPE \u00B7 "+fdpHrs+" HR FDP"),
+    el("div",{style:{display:"flex",gap:"6px"}},
+      legBtn(t,isBasic,function(){S.tracker.mode="basic";saveState();render();},"Basic","16 hr","\u00A0"),
+      legBtn(t,is18,function(){S.tracker.mode="aug";S.tracker.legs="short";saveState();render();},"18 hr","Aug","\u00A0"),
+      legBtn(t,is24,function(){S.tracker.mode="aug";S.tracker.legs="long";saveState();render();},"24 hr","Aug","\u00A0")
+    )
+  );
+
+  /* ----- alert date + time input ----- */
+  var dateEl=el("input",{type:"date",value:tr.alertDate||todayStr(),style:{flex:"1",padding:"7px 8px",fontSize:"14px",fontWeight:"600",
+    border:"none",borderRadius:"8px",background:"#fff",color:"#1a1a1a",outline:"2px solid "+t.inputRing,fontFamily:"inherit"}});
+  dateEl.addEventListener("change",function(){ S.tracker.alertDate=dateEl.value||todayStr(); saveState(); recompute(); });
+  var timeEl=el("input",{type:"text",inputmode:"numeric",placeholder:"\u2013\u2013:\u2013\u2013",value:tr.alert||"",maxlength:"5",
+    style:{width:"66px",textAlign:"center",padding:"7px 4px",fontSize:"15px",fontWeight:"700",
+      border:"none",borderRadius:"8px",background:"#fff",color:"#1a1a1a",outline:"2px solid "+t.inputRing,
+      fontFamily:"'SF Mono',ui-monospace,monospace"}});
+  timeEl.addEventListener("input",function(){ var nv=fmtTimeTyping(timeEl.value); if(nv!==timeEl.value)timeEl.value=nv; S.tracker.alert=nv; saveState(); recompute(); });
+
+  var alertCard=card(t,"10px 14px",
+    el("div",{style:{fontSize:"11px",fontWeight:"700",color:t.labelColor,marginBottom:"4px",letterSpacing:"0.3px"}},"ALERT  (day + Zulu time)"),
+    el("div",{style:{display:"flex",gap:"6px",alignItems:"center"}},dateEl,
+      el("div",{style:{display:"flex",alignItems:"center"}},timeEl,mark(t,"Z")))
+  );
+
+  /* ----- info line: label | Zulu+Z (+JD) | Local+L ----- */
+  function infoLine(lbl){
+    var zT=document.createTextNode("--:--"), lT=document.createTextNode("--:--"), jT=document.createTextNode("");
+    var zEl=el("div",{class:"mono",style:{fontSize:"15px",fontWeight:"700",color:t.zuluColor,display:"flex",alignItems:"baseline"}});
+    zEl.appendChild(zT); zEl.appendChild(mark(t,"Z"));
+    var lEl=el("div",{class:"mono",style:{fontSize:"15px",fontWeight:"700",color:t.localColor,display:"flex",alignItems:"baseline"}});
+    lEl.appendChild(lT); lEl.appendChild(mark(t,"L"));
+    var jEl=el("div",{class:"mono",style:{fontSize:"10px",fontWeight:"700",color:t.subColor,marginTop:"1px"}});
+    jEl.appendChild(jT);
+    var e=el("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",padding:"4px 0"}},
+      el("div",null,
+        el("div",{style:{fontSize:"13px",color:t.subColor,fontWeight:"600"}},lbl),
+        jEl
+      ),
+      el("div",{style:{display:"flex",gap:"10px",alignItems:"baseline"}},zEl,lEl)
+    );
+    e.set=function(z,l,jd){ zT.nodeValue=z; lT.nodeValue=l; jT.nodeValue=jd?jd:""; };
+    return e;
+  }
+  var showLine=infoLine("Show \u00B7 FDP starts");
+  var fdpLine=infoLine("FDP Expires");
+  var cdtLine=infoLine("CDT");
+  var infoCard=card(t,"6px 14px",showLine,fdpLine,cdtLine);
+
+  /* ----- remaining now ----- */
+  var remTxt=document.createTextNode("--:--");
+  var remBox=el("div",{class:"mono",style:{fontSize:"34px",fontWeight:"800",color:t.accent,letterSpacing:"0.5px",lineHeight:"1"}});
+  remBox.appendChild(remTxt);
+  var warn=el("div",{style:{marginTop:"8px",fontSize:"12px",fontWeight:"700",color:"#C0392B",textAlign:"center",display:"none"}},
+    "\u26A0 Past the FDP limit");
+  var countCard=card(t,"12px 14px",
+    el("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between"}},
+      el("div",null,
+        el("div",{style:{fontWeight:"700",fontSize:"15px",color:t.labelColor}},"Remaining NOW"),
+        el("div",{style:{fontSize:"10px",color:t.subColor,fontWeight:"600",marginTop:"1px"}},"FDP left at current time")
+      ),
+      remBox
+    ),
+    warn
+  );
+  countCard.style.marginBottom="0";
+
+  function recompute(){
+    var o=parseFloat(S.offset)||0;
+    var fh=S.tracker.mode==="basic"?16:(S.tracker.legs==="short"?18:24);
+    var aAbs=absFromDateTime(S.tracker.alertDate,S.tracker.alert);
+    var sAbs=aAbs===null?null:aAbs+60;          // Show = Alert + 1:00
+    var fAbs=sAbs===null?null:sAbs+fh*60;        // FDP end = Show + cap
+    var ch=(S.tracker.mode==="basic")?18:24.75;  // CDT: basic Show+18:00, aug Show+24:45
+    var cAbs=sAbs===null?null:sAbs+ch*60;
+    showLine.set(absZ(sAbs,0),absZ(sAbs,o),julCalFromAbs(sAbs));
+    fdpLine.set(absZ(fAbs,0),absZ(fAbs,o),julCalFromAbs(fAbs));
+    cdtLine.set(absZ(cAbs,0),absZ(cAbs,o),julCalFromAbs(cAbs));
+    var nowAbs=Date.now()/60000;
+    var rem=(fAbs!==null)?Math.round(fAbs-nowAbs):null;
+    remTxt.nodeValue=fmtDur(rem); remBox.style.color=remColor(t,rem);
+    warn.style.display=(rem!==null&&rem<=0)?"block":"none";
+  }
+  recompute();
+
+  var wrap=el("div",null,typeCard,alertCard,infoCard,countCard);
+  wrap._tick=recompute;     // clock refreshes remaining without rebuilding inputs
+  liveNode=wrap;
+  return wrap;
+}
+
+
+/* ---------- conversion bar ---------- */
+function convBar(t,localNow){
+  var inp=el("input",{type:"number",step:"0.5",value:S.offset,style:{width:"52px",padding:"4px 6px",fontSize:"14px",fontWeight:"700",
+    textAlign:"center",border:"none",borderRadius:"7px",background:"#fff",color:"#1a1a1a",outline:"1.5px solid "+t.inputRing}});
+  inp.addEventListener("input",function(){S.offset=inp.value;saveState();rerenderContent();updateLocalNow();});
+  return el("div",{style:{marginBottom:"8px"}},
+    el("div",{style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"8px",background:t.card,borderRadius:"11px",padding:"6px 14px"}},
+      el("span",{style:{fontSize:"13px",color:t.labelColor,fontWeight:"600"}},"Conversion: Zulu"),
+      inp,
+      el("span",{style:{fontSize:"13px",color:t.labelColor,fontWeight:"600"}},"= Local"),
+      el("span",{style:{width:"1px",height:"16px",background:t.rowLine}}),
+      el("span",{id:"localnow",class:"mono",style:{fontSize:"13px",fontWeight:"700",color:t.accent}},localNow+" L")
+    )
+  );
+}
+function updateLocalNow(){
+  var ln=document.getElementById("localnow"); if(!ln) return;
+  var off=parseFloat(S.offset)||0, now=new Date();
+  var z=now.getUTCHours()*60+now.getUTCMinutes();
+  ln.textContent=fromMinutes(z+off*60)+" L";
+}
+
+/* ---------- header (clock updates here only) ---------- */
+function header(t,now){
+  var z=now.getUTCHours()*60+now.getUTCMinutes();
+  var nowZ=fromMinutes(z);
+  var nowDate=String(now.getUTCMonth()+1).padStart(2,"0")+"/"+String(now.getUTCDate()).padStart(2,"0");
+  var jul=julianDate(now);
+  return el("div",{id:"hdr",style:{background:t.headerBg,borderRadius:"14px",padding:"9px 16px",marginBottom:"8px",
+    boxShadow:"0 4px 16px rgba(0,0,0,0.18)",display:"flex",alignItems:"center",justifyContent:"space-between",gap:"12px"}},
+    el("div",{style:{textAlign:"left"}},
+      el("div",{style:{color:t.headerColor,fontWeight:"800",fontSize:"17px",letterSpacing:"0.2px",lineHeight:"1.05"}},"C-17 DUTY DAY"),
+      el("div",{style:{color:t.headerSubColor,fontWeight:"700",fontSize:"11px",letterSpacing:"2px",marginTop:"2px"}},t.headerSub)
+    ),
+    el("div",{style:{textAlign:"right"}},
+      el("div",{id:"hdrZ",class:"mono",style:{color:t.headerColor,fontWeight:"800",fontSize:"19px",letterSpacing:"0.5px",lineHeight:"1"}},nowZ+"Z"),
+      el("div",{id:"hdrD",style:{color:t.headerSubColor,fontSize:"10px",fontWeight:"700",letterSpacing:"0.5px",marginTop:"3px"}},nowDate+" \u00B7 JD "+jul)
+    )
+  );
+}
+function tabBtn(active,onClick,accent,txt){
+  return el("button",{onClick:onClick,style:{flex:"1",padding:"7px 6px",borderRadius:"9px",fontSize:"13px",fontWeight:"700",
+    letterSpacing:"0.2px",color:active?"#fff":"rgba(255,255,255,0.85)",background:active?accent:"transparent",
+    boxShadow:active?"0 2px 8px rgba(0,0,0,0.2)":"none",transition:"all 0.2s"}},txt);
+}
+
+/* ---------- erase ---------- */
+var eraseArmed=false, eraseTimer=null;
+function doErase(){
+  var keepTab=S.tab; S=clone(defaultState); S.tab=keepTab; eraseArmed=false; saveState(); render();
+}
+function eraseClick(btn){
+  if(!eraseArmed){
+    eraseArmed=true;
+    btn.textContent="Tap again to confirm \u2014 Erase All";
+    btn.style.background="#C0392B"; btn.style.color="#fff"; btn.style.borderColor="#C0392B";
+    if(eraseTimer) clearTimeout(eraseTimer);
+    eraseTimer=setTimeout(function(){
+      eraseArmed=false;
+      btn.textContent="Erase All Entries";
+      btn.style.background="rgba(192,57,43,0.14)"; btn.style.color="#C0392B"; btn.style.borderColor="rgba(192,57,43,0.4)";
+    },3000);
+  } else {
+    if(eraseTimer) clearTimeout(eraseTimer);
+    doErase();
+  }
+}
+
+/* ---------- render: content swap only for #content ---------- */
+var liveNode=null;
+function buildContent(t,now){
+  liveNode=null;
+  var node;
+  if(S.tab==="bravo") node=bravoTab(t);
+  else if(S.tab==="airland") node=airlandTab(t);
+  else node=trackerTab(t,now);
+  return node;
+}
+function rerenderContent(){
+  var t=THEMES[S.tab];
+  var holder=document.getElementById("content");
+  if(!holder) return;
+  holder.innerHTML="";
+  holder.appendChild(buildContent(t,new Date()));
+}
+function render(){
+  var t=THEMES[S.tab];
+  document.body.style.background=t.bg;
+  var off=parseFloat(S.offset)||0, now=new Date();
+  var z=now.getUTCHours()*60+now.getUTCMinutes();
+  var localNow=fromMinutes(z+off*60);
+
+  var tabs=el("div",{style:{display:"flex",gap:"6px",background:"rgba(0,0,0,0.10)",borderRadius:"11px",padding:"4px",marginBottom:"8px"}},
+    tabBtn(S.tab==="bravo",function(){S.tab="bravo";saveState();render();},THEMES.bravo.accent,"Bravo"),
+    tabBtn(S.tab==="airland",function(){S.tab="airland";saveState();render();},THEMES.airland.accent,"Airland"),
+    tabBtn(S.tab==="tracker",function(){S.tab="tracker";saveState();render();},THEMES.tracker.accent,"Tracker")
+  );
+  var content=el("div",{id:"content"}, buildContent(t,now));
+  var erase=el("button",{style:{width:"100%",marginTop:"12px",padding:"9px",borderRadius:"10px",
+    background:"rgba(192,57,43,0.14)",color:"#C0392B",fontSize:"13px",fontWeight:"700",
+    border:"1.5px solid rgba(192,57,43,0.4)",letterSpacing:"0.3px"}},"Erase All Entries");
+  erase.addEventListener("click",function(){ eraseClick(erase); });
+  var foot=el("div",{style:{textAlign:"center",marginTop:"8px",fontSize:"9px",color:t.subColor,fontWeight:"500"}},
+    "Verify against current AFI/AFMAN guidance.");
+
+  var app=document.getElementById("app");
+  app.innerHTML="";
+  app.appendChild(header(t,now));
+  app.appendChild(tabs);
+  app.appendChild(convBar(t,localNow));
+  app.appendChild(content);
+  app.appendChild(erase);
+  app.appendChild(foot);
+}
+
+/* clock: update header text + remaining countdowns without rebuilding inputs */
+function tick(){
+  var now=new Date();
+  var z=now.getUTCHours()*60+now.getUTCMinutes();
+  var hz=document.getElementById("hdrZ"); if(hz) hz.textContent=fromMinutes(z)+"Z";
+  var hd=document.getElementById("hdrD");
+  if(hd){ var nd=String(now.getUTCMonth()+1).padStart(2,"0")+"/"+String(now.getUTCDate()).padStart(2,"0"); hd.textContent=nd+" \u00B7 JD "+julianDate(now); }
+  updateLocalNow();
+  // live countdowns (Bravo + Tracker): update in place, never rebuild inputs
+  if(liveNode && liveNode._tick){
+    liveNode._tick();
+  }
+}
+
+render();
+setInterval(tick,1000);
+
+} catch(err){
+  var e=document.getElementById("err");
+  if(e){ e.style.display="block"; e.textContent="Error: "+(err && err.message ? err.message : err)+"\n"+(err&&err.stack?err.stack:""); }
+}
+</script>
+<script>
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", function () {
+    navigator.serviceWorker.register("./sw.js").catch(function () {});
+  });
+}
+</script>
+</body>
+</html>
