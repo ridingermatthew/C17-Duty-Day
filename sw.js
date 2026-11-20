@@ -1,5 +1,5 @@
 /* C-17 Duty Day - offline service worker */
-var CACHE = "c17-duty-v2";
+var CACHE = "c17-duty-v4";
 var ASSETS = ["./", "./index.html", "./manifest.json"];
 
 self.addEventListener("install", function (e) {
