@@ -75,6 +75,8 @@ function loadState(){
 }
 function saveState(){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }catch(e){} }
 var S = loadState();
+// tracker tab removed; send any stored "tracker" selection to a valid tab
+if(S.tab==="tracker"){ S.tab="bravo"; }
 // follow device timezone unless the user has manually overridden
 if(S.autoOffset){ S.offset = String(deviceOffset()); }
 
@@ -411,108 +413,6 @@ function absZ(a,o){ if(a===null)return "--:--"; var d=new Date((a+o*60)*60000); 
 function julFromAbs(a){ if(a===null)return ""; return julianDate(new Date(a*60000)); }
 function julCalFromAbs(a){ if(a===null)return ""; return julCal(new Date(a*60000)); }
 
-function trackerTab(t,now){
-  var off=parseFloat(S.offset)||0;
-  var tr=S.tracker;
-  // default alert date to today if blank
-  if(!tr.alertDate){ tr.alertDate=todayStr(); }
-
-  var fdpHrs=tr.mode==="basic"?16:(tr.legs==="short"?18:24);
-
-  /* ----- type selector: Basic / 18hr Aug / 24hr Aug ----- */
-  var isBasic=tr.mode==="basic", is18=(tr.mode==="aug"&&tr.legs==="short"), is24=(tr.mode==="aug"&&tr.legs==="long");
-  var typeCard=card(t,"6px 10px",
-    el("div",{style:{fontSize:"10px",fontWeight:"700",color:t.labelColor,marginBottom:"4px",letterSpacing:"0.5px"}},
-      "DUTY DAY TYPE \u00B7 "+fdpHrs+" HR FDP"),
-    el("div",{style:{display:"flex",gap:"6px"}},
-      legBtn(t,isBasic,function(){S.tracker.mode="basic";saveState();render();},"Basic","16 hr","\u00A0"),
-      legBtn(t,is18,function(){S.tracker.mode="aug";S.tracker.legs="short";saveState();render();},"18 hr","Aug","\u00A0"),
-      legBtn(t,is24,function(){S.tracker.mode="aug";S.tracker.legs="long";saveState();render();},"24 hr","Aug","\u00A0")
-    )
-  );
-
-  /* ----- alert date + time input ----- */
-  var dateEl=el("input",{type:"date",value:tr.alertDate||todayStr(),style:{flex:"1",padding:"7px 8px",fontSize:"14px",fontWeight:"600",
-    border:"none",borderRadius:"8px",background:"#fff",color:"#1a1a1a",outline:"2px solid "+t.inputRing,fontFamily:"inherit"}});
-  dateEl.addEventListener("change",function(){ S.tracker.alertDate=dateEl.value||todayStr(); saveState(); recompute(); });
-  var timeEl=el("input",{type:"text",inputmode:"numeric",placeholder:"\u2013\u2013:\u2013\u2013",value:tr.alert||"",maxlength:"5",
-    style:{width:"66px",textAlign:"center",padding:"7px 4px",fontSize:"15px",fontWeight:"700",
-      border:"none",borderRadius:"8px",background:"#fff",color:"#1a1a1a",outline:"2px solid "+t.inputRing,
-      fontFamily:"'SF Mono',ui-monospace,monospace"}});
-  timeEl.addEventListener("input",function(){ var nv=fmtTimeTyping(timeEl.value); if(nv!==timeEl.value)timeEl.value=nv; S.tracker.alert=nv; saveState(); recompute(); });
-
-  var alertCard=card(t,"10px 14px",
-    el("div",{style:{fontSize:"11px",fontWeight:"700",color:t.labelColor,marginBottom:"4px",letterSpacing:"0.3px"}},"ALERT  (day + Zulu time)"),
-    el("div",{style:{display:"flex",gap:"6px",alignItems:"center"}},dateEl,
-      el("div",{style:{display:"flex",alignItems:"center"}},timeEl,mark(t,"Z")))
-  );
-
-  /* ----- info line: label | Zulu+Z (+JD) | Local+L ----- */
-  function infoLine(lbl){
-    var zT=document.createTextNode("--:--"), lT=document.createTextNode("--:--"), jT=document.createTextNode("");
-    var zEl=el("div",{class:"mono",style:{fontSize:"15px",fontWeight:"700",color:t.zuluColor,display:"flex",alignItems:"baseline"}});
-    zEl.appendChild(zT); zEl.appendChild(mark(t,"Z"));
-    var lEl=el("div",{class:"mono",style:{fontSize:"15px",fontWeight:"700",color:t.localColor,display:"flex",alignItems:"baseline"}});
-    lEl.appendChild(lT); lEl.appendChild(mark(t,"L"));
-    var jEl=el("div",{class:"mono",style:{fontSize:"10px",fontWeight:"700",color:t.subColor,marginTop:"1px"}});
-    jEl.appendChild(jT);
-    var e=el("div",{style:{display:"flex",justifyContent:"space-between",alignItems:"flex-start",padding:"4px 0"}},
-      el("div",null,
-        el("div",{style:{fontSize:"13px",color:t.subColor,fontWeight:"600"}},lbl),
-        jEl
-      ),
-      el("div",{style:{display:"flex",gap:"10px",alignItems:"baseline"}},zEl,lEl)
-    );
-    e.set=function(z,l,jd){ zT.nodeValue=z; lT.nodeValue=l; jT.nodeValue=jd?jd:""; };
-    return e;
-  }
-  var showLine=infoLine("Show \u00B7 FDP starts");
-  var fdpLine=infoLine("FDP Expires");
-  var cdtLine=infoLine("CDT");
-  var infoCard=card(t,"6px 14px",showLine,fdpLine,cdtLine);
-
-  /* ----- remaining now ----- */
-  var remTxt=document.createTextNode("--:--");
-  var remBox=el("div",{class:"mono",style:{fontSize:"34px",fontWeight:"800",color:t.accent,letterSpacing:"0.5px",lineHeight:"1"}});
-  remBox.appendChild(remTxt);
-  var warn=el("div",{style:{marginTop:"8px",fontSize:"12px",fontWeight:"700",color:"#C0392B",textAlign:"center",display:"none"}},
-    "\u26A0 Past the FDP limit");
-  var countCard=card(t,"12px 14px",
-    el("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between"}},
-      el("div",null,
-        el("div",{style:{fontWeight:"700",fontSize:"15px",color:t.labelColor}},"Remaining NOW"),
-        el("div",{style:{fontSize:"10px",color:t.subColor,fontWeight:"600",marginTop:"1px"}},"FDP left at current time")
-      ),
-      remBox
-    ),
-    warn
-  );
-  countCard.style.marginBottom="0";
-
-  function recompute(){
-    var o=parseFloat(S.offset)||0;
-    var fh=S.tracker.mode==="basic"?16:(S.tracker.legs==="short"?18:24);
-    var aAbs=absFromDateTime(S.tracker.alertDate,S.tracker.alert);
-    var sAbs=aAbs===null?null:aAbs+60;          // Show = Alert + 1:00
-    var fAbs=sAbs===null?null:sAbs+fh*60;        // FDP end = Show + cap
-    var ch=(S.tracker.mode==="basic")?18:24.75;  // CDT: basic Show+18:00, aug Show+24:45
-    var cAbs=sAbs===null?null:sAbs+ch*60;
-    showLine.set(absZ(sAbs,0),absZ(sAbs,o),julCalFromAbs(sAbs));
-    fdpLine.set(absZ(fAbs,0),absZ(fAbs,o),julCalFromAbs(fAbs));
-    cdtLine.set(absZ(cAbs,0),absZ(cAbs,o),julCalFromAbs(cAbs));
-    var nowAbs=Date.now()/60000;
-    var rem=(fAbs!==null)?Math.round(fAbs-nowAbs):null;
-    remTxt.nodeValue=fmtDur(rem); remBox.style.color=remColor(t,rem);
-    warn.style.display=(rem!==null&&rem<=0)?"block":"none";
-  }
-  recompute();
-
-  var wrap=el("div",null,typeCard,alertCard,infoCard,countCard);
-  wrap._tick=recompute;     // clock refreshes remaining without rebuilding inputs
-  liveNode=wrap;
-  return wrap;
-}
-
 /* ============================================================
    TIME MATH TAB
    Two date+Zulu-time sections; shows duration H:MM between them.
@@ -674,7 +574,6 @@ function buildContent(t,now){
   var node;
   if(S.tab==="bravo") node=bravoTab(t);
   else if(S.tab==="airland") node=airlandTab(t);
-  else if(S.tab==="tracker") node=trackerTab(t,now);
   else node=timeMathTab(t);
   return node;
 }
@@ -695,7 +594,6 @@ function render(){
   var tabs=el("div",{style:{display:"flex",gap:"6px",background:"rgba(0,0,0,0.10)",borderRadius:"11px",padding:"4px",marginBottom:"8px"}},
     tabBtn(S.tab==="bravo",function(){S.tab="bravo";saveState();render();},THEMES.bravo.accent,"Bravo"),
     tabBtn(S.tab==="airland",function(){S.tab="airland";saveState();render();},THEMES.airland.accent,"Airland"),
-    tabBtn(S.tab==="tracker",function(){S.tab="tracker";saveState();render();},THEMES.tracker.accent,"Tracker"),
     tabBtn(S.tab==="timemath",function(){S.tab="timemath";saveState();render();},THEMES.timemath.accent,"Time Math")
   );
   var content=el("div",{id:"content"}, buildContent(t,now));
