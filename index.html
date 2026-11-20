@@ -41,14 +41,22 @@ var STORE_KEY = "c17duty.v3";
 var defaultState = {
   tab: "bravo",
   offset: "-4",
+  autoOffset: true,   // when true, follow the device timezone automatically
   bravo: { lfa: "", lfaDate: "" },
   airland: { takeoff: "", legs: "long", bravoSeq: false },
   tracker: {
     mode: "aug", legs: "long",
     alertDate: "",   // YYYY-MM-DD; blank => default to today at render
     alert: ""        // HH:MM Zulu
+  },
+  timemath: {
+    aDate: "", aTime: "",   // section A: date (YYYY-MM-DD) + HH:MM Zulu
+    bDate: "", bTime: ""    // section B
   }
 };
+// device's current Zulu->Local offset in hours (e.g. EDT => -4). No permissions needed.
+function deviceOffset(){ return -(new Date().getTimezoneOffset())/60; }
+function fmtOffset(h){ return (h>=0?"+":"")+ (Math.round(h*10)/10); }
 function loadState(){
   try{
     var raw = localStorage.getItem(STORE_KEY);
@@ -57,14 +65,18 @@ function loadState(){
     var s = clone(defaultState);
     if(p.tab) s.tab = p.tab;
     if(p.offset !== undefined) s.offset = p.offset;
+    if(p.autoOffset !== undefined) s.autoOffset = p.autoOffset;
     if(p.bravo) for(var k in p.bravo) s.bravo[k]=p.bravo[k];
     if(p.airland) for(var k2 in p.airland) s.airland[k2]=p.airland[k2];
     if(p.tracker) for(var k3 in p.tracker) s.tracker[k3]=p.tracker[k3];
+    if(p.timemath) for(var k4 in p.timemath) s.timemath[k4]=p.timemath[k4];
     return s;
   }catch(e){ return clone(defaultState); }
 }
 function saveState(){ try{ localStorage.setItem(STORE_KEY, JSON.stringify(S)); }catch(e){} }
 var S = loadState();
+// follow device timezone unless the user has manually overridden
+if(S.autoOffset){ S.offset = String(deviceOffset()); }
 
 /* ---------- time utils ---------- */
 function toMinutes(hhmm){
@@ -120,7 +132,12 @@ var THEMES = {
     headerBg:"linear-gradient(135deg,#1F8A5B 0%,#14694A 100%)", headerColor:"#fff",
     headerSub:"DUTY DAY TRACKER", headerSubColor:"#A8E6C9", card:"rgba(245,250,248,0.94)",
     accent:"#1F8A5B", inputRing:"#1F8A5B", rowLine:"rgba(20,60,45,0.12)",
-    labelColor:"#16382a", subColor:"#4a6b5c", zuluColor:"#0f2c20", localColor:"#345048", highlight:"#FFE600" }
+    labelColor:"#16382a", subColor:"#4a6b5c", zuluColor:"#0f2c20", localColor:"#345048", highlight:"#FFE600" },
+  timemath:{ bg:"linear-gradient(165deg,#3B3350 0%,#332C47 55%,#2B2540 100%)",
+    headerBg:"linear-gradient(135deg,#6C5CE0 0%,#4B3FB0 100%)", headerColor:"#fff",
+    headerSub:"TIME MATH", headerSubColor:"#D6CEF5", card:"rgba(247,245,252,0.94)",
+    accent:"#5A4BC4", inputRing:"#5A4BC4", rowLine:"rgba(50,40,90,0.12)",
+    labelColor:"#241d3d", subColor:"#5c537a", zuluColor:"#1c1533", localColor:"#423a63", highlight:"#FFE600" }
 };
 
 /* ---------- DOM helper ---------- */
@@ -281,11 +298,15 @@ function bravoTab(t){
       border:"none",borderRadius:"8px",background:"#fff",color:"#1a1a1a",outline:"2px solid "+t.inputRing,
       fontFamily:"'SF Mono',ui-monospace,monospace"}});
   timeEl.addEventListener("input",function(){ var nv=fmtTimeTyping(timeEl.value); if(nv!==timeEl.value)timeEl.value=nv; S.bravo.lfa=nv; saveState(); recompute(); });
+  var lfaLocalT=document.createTextNode("--:--");
+  var lfaLocal=el("div",{class:"mono",style:{fontSize:"16px",fontWeight:"600",color:t.localColor,display:"flex",alignItems:"baseline",justifyContent:"center"}});
+  lfaLocal.appendChild(lfaLocalT); lfaLocal.appendChild(mark(t,"L"));
   var lfaRow=el("div",{style:{padding:"8px 0",borderTop:"2px solid "+t.rowLine,borderBottom:"2px solid "+t.rowLine,margin:"2px 0"}},
     el("div",{style:{fontWeight:"700",fontSize:"15px",color:t.labelColor,marginBottom:"4px"}},"Earliest Alert",
       el("span",{style:{fontSize:"10px",color:t.subColor,fontWeight:"600",marginLeft:"6px"}},"Legal For Alert (LFA)")),
     el("div",{style:{display:"flex",gap:"6px",alignItems:"center"}},dateEl,
-      el("div",{style:{display:"flex",alignItems:"center"}},timeEl,mark(t,"Z")))
+      el("div",{style:{display:"flex",alignItems:"center"}},timeEl,mark(t,"Z")),
+      lfaLocal)
   );
 
   // countdown to LFA from now
@@ -303,6 +324,7 @@ function bravoTab(t){
   function recompute(){
     var o=parseFloat(S.offset)||0;
     var lfaAbs=absFromDateTime(S.bravo.lfaDate,S.bravo.lfa);
+    lfaLocalT.nodeValue=(lfaAbs===null)?"--:--":absZ(lfaAbs,o);
     rBeer.set(lfaAbs===null?null:lfaAbs-12*60,o);
     rAmb.set(lfaAbs===null?null:lfaAbs-6*60,o);
     rBurn.set(lfaAbs===null?null:lfaAbs+48*60,o);
@@ -345,7 +367,7 @@ function airlandTab(t){
       bravo?"Bravo Sequence: ON":"Bravo Sequence: OFF")
   );
   var crew=card(t,"2px 14px 4px");
-  var rBeer=row(t,"Last Beer","Takeoff \u2212 12:00",subH(to,12),off);
+  var rBeer=row(t,"Last Beer",bravo?"Alert \u2212 12:00":"Takeoff \u2212 12:00",subH(bravo?alert:to,12),off);
   var rAmb=row(t,"Last Ambien","Alert \u2212 6:00",subH(alert,6),off,{last:true});
   crew.appendChild(rBeer); crew.appendChild(rAmb);
   var normal=card(t,"2px 14px 4px");
@@ -361,7 +383,7 @@ function airlandTab(t){
     var ao=S.airland.bravoSeq?3:3.75;
     var sh=subH(m,2.75), al=subH(m,ao), st=subH(m,0.75);
     var fh=airlandFdpHrs(S.airland.legs);
-    rBeer.update(subH(m,12),o); rAmb.update(subH(al,6),o);
+    rBeer.update(subH(S.airland.bravoSeq?al:m,12),o); rAmb.update(subH(al,6),o);
     rAlert.update(al,o); rShow.update(sh,o); rSta.update(st,o);
     rTrain.update(addH(sh,12),o); rStops.update(addH(sh,14),o);
     rFDP.update(addH(sh,fh),o); rCDT.update(addH(sh,cdtHrs(S.airland.legs)),o);
@@ -491,17 +513,102 @@ function trackerTab(t,now){
   return wrap;
 }
 
+/* ============================================================
+   TIME MATH TAB
+   Two date+Zulu-time sections; shows duration H:MM between them.
+   ============================================================ */
+function timeMathTab(t){
+  var tm=S.timemath;
+
+  // builds one section (A or B); returns {card, refresh}
+  function section(letter, getDate,getTime,setDate,setTime){
+    var jdCal=document.createTextNode("");  // "JD 26323 · 19NOV"
+    var dateEl=el("input",{type:"date",value:getDate()||"",style:{flex:"1",padding:"7px 8px",fontSize:"14px",fontWeight:"600",
+      border:"none",borderRadius:"8px",background:"#fff",color:"#1a1a1a",outline:"2px solid "+t.inputRing,fontFamily:"inherit"}});
+    var timeEl=el("input",{type:"text",inputmode:"numeric",placeholder:"––:––",value:getTime()||"",maxlength:"5",
+      style:{width:"66px",textAlign:"center",padding:"7px 4px",fontSize:"15px",fontWeight:"700",
+        border:"none",borderRadius:"8px",background:"#fff",color:"#1a1a1a",outline:"2px solid "+t.inputRing,
+        fontFamily:"'SF Mono',ui-monospace,monospace"}});
+    function refreshJdCal(){
+      var ds=getDate();
+      if(!ds){ jdCal.nodeValue=""; return; }
+      var p=ds.split("-"); if(p.length!==3){ jdCal.nodeValue=""; return; }
+      var d=new Date(Date.UTC(+p[0],+p[1]-1,+p[2]));
+      jdCal.nodeValue=julCal(d);   // "JD ##### · DDMON"
+    }
+    dateEl.addEventListener("change",function(){ setDate(dateEl.value); saveState(); refreshJdCal(); recompute(); });
+    timeEl.addEventListener("input",function(){ var nv=fmtTimeTyping(timeEl.value); if(nv!==timeEl.value)timeEl.value=nv; setTime(nv); saveState(); recompute(); });
+    var nowBtn=el("button",{style:{fontSize:"12px",fontWeight:"700",padding:"6px 10px",borderRadius:"8px",border:"none",
+      background:t.accent,color:"#fff",letterSpacing:"0.3px",whiteSpace:"nowrap"}},"Now");
+    nowBtn.addEventListener("click",function(){
+      var n=new Date();
+      var ds=n.getUTCFullYear()+"-"+String(n.getUTCMonth()+1).padStart(2,"0")+"-"+String(n.getUTCDate()).padStart(2,"0");
+      var ts=fromMinutes(n.getUTCHours()*60+n.getUTCMinutes());
+      setDate(ds); setTime(ts); saveState();
+      dateEl.value=ds; timeEl.value=ts; refreshJdCal(); recompute();
+    });
+    refreshJdCal();
+    var c=card(t,"10px 14px",
+      el("div",{style:{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:"6px"}},
+        el("div",{style:{fontSize:"13px",fontWeight:"800",color:t.accent,letterSpacing:"0.5px"}},"TIME "+letter),
+        nowBtn
+      ),
+      el("div",{style:{display:"flex",gap:"6px",alignItems:"center"}},dateEl,
+        el("div",{style:{display:"flex",alignItems:"center"}},timeEl,mark(t,"Z"))),
+      el("div",{class:"mono",style:{fontSize:"11px",fontWeight:"700",color:t.subColor,marginTop:"4px"}},jdCal)
+    );
+    c.style.marginBottom="6px";
+    return c;
+  }
+
+  var secA=section("A",function(){return S.timemath.aDate;},function(){return S.timemath.aTime;},
+    function(v){S.timemath.aDate=v;},function(v){S.timemath.aTime=v;});
+  var secB=section("B",function(){return S.timemath.bDate;},function(){return S.timemath.bTime;},
+    function(v){S.timemath.bDate=v;},function(v){S.timemath.bTime=v;});
+
+  // result
+  var durTxt=document.createTextNode("--:--");
+  var durBox=el("div",{class:"mono",style:{fontSize:"40px",fontWeight:"800",color:t.accent,letterSpacing:"0.5px",lineHeight:"1"}});
+  durBox.appendChild(durTxt);
+  var durHint=el("div",{style:{fontSize:"10px",color:t.subColor,fontWeight:"600",marginTop:"4px",textAlign:"center"}},"B − A");
+  var resultCard=card(t,"14px 14px",
+    el("div",{style:{textAlign:"center",fontSize:"12px",fontWeight:"700",color:t.labelColor,letterSpacing:"0.5px",marginBottom:"6px"}},"DURATION"),
+    el("div",{style:{textAlign:"center"}},durBox),
+    durHint
+  );
+  resultCard.style.marginBottom="0";
+
+  function recompute(){
+    var aAbs=absFromDateTime(S.timemath.aDate,S.timemath.aTime);
+    var bAbs=absFromDateTime(S.timemath.bDate,S.timemath.bTime);
+    if(aAbs===null||bAbs===null){ durTxt.nodeValue="--:--"; durBox.style.color=t.accent; durHint.textContent="Enter both times"; return; }
+    var diff=Math.round(bAbs-aAbs);   // minutes, signed (B - A)
+    durTxt.nodeValue=fmtDur(diff);
+    durBox.style.color=(diff<0)?"#C0392B":t.accent;
+    durHint.textContent=(diff<0)?"B is before A":"B − A";
+  }
+  recompute();
+
+  return el("div",null,secA,secB,resultCard);
+}
+
 
 /* ---------- conversion bar ---------- */
 function convBar(t,localNow){
   var inp=el("input",{type:"number",step:"0.5",value:S.offset,style:{width:"52px",padding:"4px 6px",fontSize:"14px",fontWeight:"700",
     textAlign:"center",border:"none",borderRadius:"7px",background:"#fff",color:"#1a1a1a",outline:"1.5px solid "+t.inputRing}});
-  inp.addEventListener("input",function(){S.offset=inp.value;saveState();rerenderContent();updateLocalNow();});
+  inp.addEventListener("input",function(){S.offset=inp.value;S.autoOffset=false;saveState();rerenderContent();updateLocalNow();
+    autoBtn.style.background="rgba(0,0,0,0.12)";autoBtn.style.color=t.subColor;autoBtn.textContent="Auto";});
+  var autoBtn=el("button",{style:{fontSize:"11px",fontWeight:"700",padding:"4px 8px",borderRadius:"7px",border:"none",
+    background:S.autoOffset?t.accent:"rgba(0,0,0,0.12)",color:S.autoOffset?"#fff":t.subColor,letterSpacing:"0.3px"}},
+    S.autoOffset?"AUTO":"Auto");
+  autoBtn.addEventListener("click",function(){ S.autoOffset=true; S.offset=String(deviceOffset()); saveState(); render(); });
   return el("div",{style:{marginBottom:"8px"}},
     el("div",{style:{display:"flex",alignItems:"center",justifyContent:"center",gap:"8px",background:t.card,borderRadius:"11px",padding:"6px 14px"}},
-      el("span",{style:{fontSize:"13px",color:t.labelColor,fontWeight:"600"}},"Conversion: Zulu"),
+      el("span",{style:{fontSize:"13px",color:t.labelColor,fontWeight:"600"}},"Zulu"),
       inp,
       el("span",{style:{fontSize:"13px",color:t.labelColor,fontWeight:"600"}},"= Local"),
+      autoBtn,
       el("span",{style:{width:"1px",height:"16px",background:t.rowLine}}),
       el("span",{id:"localnow",class:"mono",style:{fontSize:"13px",fontWeight:"700",color:t.accent}},localNow+" L")
     )
@@ -533,8 +640,8 @@ function header(t,now){
   );
 }
 function tabBtn(active,onClick,accent,txt){
-  return el("button",{onClick:onClick,style:{flex:"1",padding:"7px 6px",borderRadius:"9px",fontSize:"13px",fontWeight:"700",
-    letterSpacing:"0.2px",color:active?"#fff":"rgba(255,255,255,0.85)",background:active?accent:"transparent",
+  return el("button",{onClick:onClick,style:{flex:"1",padding:"7px 3px",borderRadius:"9px",fontSize:"12px",fontWeight:"700",
+    letterSpacing:"0px",whiteSpace:"nowrap",color:active?"#fff":"rgba(255,255,255,0.85)",background:active?accent:"transparent",
     boxShadow:active?"0 2px 8px rgba(0,0,0,0.2)":"none",transition:"all 0.2s"}},txt);
 }
 
@@ -567,7 +674,8 @@ function buildContent(t,now){
   var node;
   if(S.tab==="bravo") node=bravoTab(t);
   else if(S.tab==="airland") node=airlandTab(t);
-  else node=trackerTab(t,now);
+  else if(S.tab==="tracker") node=trackerTab(t,now);
+  else node=timeMathTab(t);
   return node;
 }
 function rerenderContent(){
@@ -587,7 +695,8 @@ function render(){
   var tabs=el("div",{style:{display:"flex",gap:"6px",background:"rgba(0,0,0,0.10)",borderRadius:"11px",padding:"4px",marginBottom:"8px"}},
     tabBtn(S.tab==="bravo",function(){S.tab="bravo";saveState();render();},THEMES.bravo.accent,"Bravo"),
     tabBtn(S.tab==="airland",function(){S.tab="airland";saveState();render();},THEMES.airland.accent,"Airland"),
-    tabBtn(S.tab==="tracker",function(){S.tab="tracker";saveState();render();},THEMES.tracker.accent,"Tracker")
+    tabBtn(S.tab==="tracker",function(){S.tab="tracker";saveState();render();},THEMES.tracker.accent,"Tracker"),
+    tabBtn(S.tab==="timemath",function(){S.tab="timemath";saveState();render();},THEMES.timemath.accent,"Time Math")
   );
   var content=el("div",{id:"content"}, buildContent(t,now));
   var erase=el("button",{style:{width:"100%",marginTop:"12px",padding:"9px",borderRadius:"10px",
